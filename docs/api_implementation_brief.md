@@ -22,18 +22,15 @@ You need to implement 4 API endpoints in the FriendlyPOS Nuxt application to ena
 
 ### How It Works
 1. Customers place orders through the web app
-2. Orders are saved to the database with a `location_id`
-3. Print server at each location polls the API every 2 seconds
-4. API returns pending orders for that specific location
-5. Print server sends orders to local thermal printers (via IP or name)
+2. Orders are saved to the database with printer IP specified
+3. Print server polls the API every 2 seconds
+4. API returns all pending orders
+5. Print server sends each order to its specified printer IP
 6. Print server updates order status via API
 
-### Printer Selection Methods
+### Printer Selection
 
-The print server supports two methods for selecting which printer to use:
-
-#### Method 1: Direct IP (Recommended)
-Include printer IP directly in the order data:
+Each order must include the printer IP directly in the order data:
 ```json
 {
   "id": "123",
@@ -43,15 +40,7 @@ Include printer IP directly in the order data:
 }
 ```
 
-#### Method 2: Named Printers
-Reference a printer by name (requires configuration):
-```json
-{
-  "id": "123",
-  "printer": "kitchen",  // Maps to IP in print server config
-  "items": [...]
-}
-```
+The web app determines which printer to use based on order type/content and includes the appropriate IP.
 
 ## Implementation Requirements
 
@@ -99,16 +88,7 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // 2. Get location_id from query params
-  const query = getQuery(event)
-  const location_id = query.location_id as string
-  
-  if (!location_id) {
-    throw createError({
-      statusCode: 400,
-      statusMessage: 'location_id is required'
-    })
-  }
+  // 2. No location filtering needed - return all pending orders
 
   // 3. Initialize Supabase client
   const supabase = createClient(
@@ -116,12 +96,11 @@ export default defineEventHandler(async (event) => {
     process.env.SUPABASE_SERVICE_KEY!
   )
 
-  // 4. Fetch pending orders
+  // 3. Fetch pending orders (no location filtering)
   const { data: orders, error } = await supabase
     .from('orders')
     .select(`
       id,
-      location_id,
       status,
       created_at,
       total,
@@ -129,6 +108,8 @@ export default defineEventHandler(async (event) => {
       customer_name,
       customer_phone,
       customer_email,
+      printer_ip,
+      printer_port,
       order_items (
         id,
         quantity,
@@ -137,7 +118,6 @@ export default defineEventHandler(async (event) => {
         notes
       )
     `)
-    .eq('location_id', location_id)
     .eq('status', 'pending')
     .eq('printed', false)
     .order('created_at', { ascending: true })
@@ -150,10 +130,9 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // 5. Format response for print server
+  // 4. Format response for print server
   return (orders || []).map(order => ({
     id: order.id,
-    location_id: order.location_id,
     status: order.status,
     created_at: order.created_at,
     items: order.order_items.map(item => ({
@@ -169,11 +148,9 @@ export default defineEventHandler(async (event) => {
       email: order.customer_email
     },
     notes: order.notes,
-    // Option 1: Direct IP printing (recommended)
+    // Direct IP printing - each order specifies its printer
     printer_ip: order.printer_ip,     // e.g., "192.168.1.101"
-    printer_port: order.printer_port || 9100,
-    // Option 2: Named printer (legacy)
-    printer: order.printer_name        // e.g., "kitchen"
+    printer_port: order.printer_port || 9100
   }))
 })
 ```

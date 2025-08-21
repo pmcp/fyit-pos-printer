@@ -17,7 +17,6 @@ from typing import Dict, List, Optional, Any
 CONFIG = {
     'api_url': os.getenv('API_URL', 'https://your-app.vercel.app'),
     'api_key': os.getenv('API_KEY', ''),
-    'location_id': os.getenv('LOCATION_ID', '1'),
     'poll_interval': int(os.getenv('POLL_INTERVAL', '2')),
     'debug_level': os.getenv('DEBUG_LEVEL', 'INFO'),
     'log_file': os.getenv('LOG_FILE', '/tmp/print_server.log'),
@@ -206,38 +205,11 @@ class PrintServer:
             return None
     
     def load_printers(self) -> bool:
-        """Load printer configurations from API or environment"""
-        try:
-            api_printers = self.make_api_request('/api/printers')
-            
-            if api_printers and isinstance(api_printers, list):
-                for printer_config in api_printers:
-                    if printer_config.get('location_id') == self.config['location_id']:
-                        name = printer_config.get('name', 'default')
-                        host = printer_config.get('host')
-                        port = printer_config.get('port', 9100)
-                        
-                        if host:
-                            self.printers[name] = SimplePrinter(host, port)
-                            logger.info(f"Loaded printer '{name}' from API: {host}:{port}")
-            
-            for key, value in os.environ.items():
-                if key.startswith('PRINTER_'):
-                    name = key.replace('PRINTER_', '').lower()
-                    if ':' in value:
-                        host, port = value.split(':')
-                        self.printers[name] = SimplePrinter(host, int(port))
-                        logger.info(f"Loaded printer '{name}' from env: {host}:{port}")
-            
-            if not self.printers:
-                logger.warning("No printers configured")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load printer configurations: {e}")
-            return False
+        """Load printer configurations - kept for backward compatibility"""
+        # Since we're using direct IP printing, we don't need pre-configured printers
+        # This method is kept for backward compatibility but always returns True
+        logger.info("Using direct IP printing mode - no pre-configuration needed")
+        return True
     
     def load_event_settings(self) -> bool:
         """Load event-specific settings from API"""
@@ -290,9 +262,7 @@ class PrintServer:
     def poll_for_jobs(self) -> List[Dict]:
         """Check API for pending print jobs"""
         try:
-            response = self.make_api_request(
-                f'/api/print-queue?location_id={self.config["location_id"]}'
-            )
+            response = self.make_api_request('/api/print-queue')
             
             if response and isinstance(response, list):
                 new_jobs = []
@@ -387,8 +357,8 @@ class PrintServer:
     def run(self):
         """Main server loop"""
         logger.info("Starting FriendlyPOS Print Server")
-        logger.info(f"Configuration: Location={self.config['location_id']}, "
-                   f"API={self.config['api_url']}, Poll={self.config['poll_interval']}s")
+        logger.info(f"Configuration: API={self.config['api_url']}, "
+                   f"Poll={self.config['poll_interval']}s")
         
         if not self.load_printers():
             logger.error("Failed to load printers, exiting")
