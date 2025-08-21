@@ -1,0 +1,6 @@
+# Minimal dependencies for OpenWrt compatibility
+# Production requirements - using only standard library where possible
+
+# Development dependencies (comment out for production)
+pytest==7.4.3
+pytest-asyncio==0.21.1

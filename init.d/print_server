@@ -1,0 +1,68 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+
+USE_PROCD=1
+PROG=/usr/local/friendlypos/print_server.py
+PIDFILE=/var/run/print_server.pid
+CONFIG_FILE=/usr/local/friendlypos/config.env
+
+start_service() {
+    [ -f "$CONFIG_FILE" ] || {
+        echo "Configuration file $CONFIG_FILE not found!"
+        return 1
+    }
+    
+    [ -x "$PROG" ] || {
+        echo "Print server $PROG not found or not executable!"
+        return 1
+    }
+    
+    . "$CONFIG_FILE"
+    
+    procd_open_instance
+    
+    procd_set_param command python3 "$PROG"
+    
+    procd_set_param env \
+        API_URL="$API_URL" \
+        API_KEY="$API_KEY" \
+        LOCATION_ID="$LOCATION_ID" \
+        POLL_INTERVAL="$POLL_INTERVAL" \
+        DEBUG_LEVEL="${DEBUG_LEVEL:-INFO}" \
+        LOG_FILE="${LOG_FILE:-/tmp/print_server.log}" \
+        RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-3}" \
+        RETRY_DELAY="${RETRY_DELAY:-5}" \
+        DEV_MODE="0"
+    
+    for var in $(env | grep '^PRINTER_' | cut -d= -f1); do
+        val=$(eval echo \$$var)
+        procd_append_param env "$var=$val"
+    done
+    
+    procd_set_param respawn 3600 5 5
+    
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    
+    procd_set_param pidfile "$PIDFILE"
+    
+    procd_close_instance
+    
+    logger -t print_server "FriendlyPOS Print Server started"
+}
+
+stop_service() {
+    logger -t print_server "Stopping FriendlyPOS Print Server"
+}
+
+reload_service() {
+    logger -t print_server "Reloading FriendlyPOS Print Server configuration"
+    stop
+    start
+}
+
+service_triggers() {
+    procd_add_reload_trigger "print_server"
+}
