@@ -88,6 +88,16 @@ class SimplePrinter:
             self.disconnect()
             return False
     
+    def send_raw_print_data(self, print_data: str) -> bool:
+        """Send base64-encoded print data directly to printer"""
+        try:
+            import base64
+            raw_data = base64.b64decode(print_data)
+            return self.send(raw_data)
+        except Exception as e:
+            logger.error(f"Failed to decode/send print data: {e}")
+            return False
+    
     def print_order(self, order: Dict[str, Any], settings: Dict[str, Any] = None) -> bool:
         """Format and print order"""
         try:
@@ -199,7 +209,12 @@ class PrintServer:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             logger.error(f"HTTP Error {e.code}: {e.reason} for {url}")
-            return None
+            # Try to read error response body
+            try:
+                error_body = e.read().decode('utf-8')
+                return json.loads(error_body)
+            except:
+                return None
         except Exception as e:
             logger.error(f"API request failed for {url}: {e}")
             return None
@@ -286,10 +301,10 @@ class PrintServer:
     def process_order(self, order: Dict) -> bool:
         """Process and print an order"""
         try:
-            # Option 1: Direct IP printing (if printer_ip is provided)
-            if order.get('printer_ip'):
-                printer_ip = order.get('printer_ip')
-                printer_port = order.get('printer_port', 9100)
+            # Option 1: Direct IP printing (using ip_address field from queue entry)
+            printer_ip = order.get('ip_address') or order.get('printer_ip')  # Support both field names
+            if printer_ip:
+                printer_port = order.get('port', order.get('printer_port', 9100))  # Support both field names
                 
                 # Validate IP is in private network range for security
                 if not self._is_private_ip(printer_ip):
@@ -301,20 +316,56 @@ class PrintServer:
                 
                 # Connect, print, and disconnect for direct IP
                 if printer.connect():
-                    success = printer.print_order(order, self.event_settings)
+                    # Use pre-formatted print_data if available, otherwise format ourselves
+                    if order.get('print_data'):
+                        logger.info(f"Using pre-formatted print data for order {order.get('id')}")
+                        success = printer.send_raw_print_data(order['print_data'])
+                    else:
+                        logger.info(f"Formatting order {order.get('id')} for printing")
+                        success = printer.print_order(order, self.event_settings)
                     printer.disconnect()
                     
                     if success:
                         logger.info(f"Successfully printed order {order.get('id')} to {printer_ip}")
                         if order.get('id'):
-                            self.make_api_request(
-                                f'/api/orders/{order["id"]}/status',
-                                method='PATCH',
-                                data={'status': 'printed', 'printed_at': datetime.now().isoformat(), 'printer_used': printer_ip}
+                            # Mark job as complete using new API endpoint
+                            result = self.make_api_request(
+                                f'/api/print-queue/{order["id"]}/complete',
+                                method='POST'
                             )
+                            if result and not result.get('error'):
+                                logger.info(f"Order {order.get('id')} marked as complete")
+                            else:
+                                error_msg = result.get('message', 'Unknown error') if result else 'No response from API'
+                                logger.error(f"Failed to mark order {order.get('id')} as complete: {error_msg}")
+                    else:
+                        # Mark job as failed with error message
+                        if order.get('id'):
+                            error_msg = f"Failed to print to {printer_ip}:{printer_port}"
+                            result = self.make_api_request(
+                                f'/api/print-queue/{order["id"]}/fail',
+                                method='POST',
+                                data={'error': error_msg}
+                            )
+                            if result:
+                                logger.info(f"Order {order.get('id')} marked as failed")
+                            else:
+                                logger.warning(f"Failed to mark order {order.get('id')} as failed")
                     return success
                 else:
                     logger.error(f"Failed to connect to printer at {printer_ip}:{printer_port}")
+                    # Mark job as failed with connection error
+                    if order.get('id'):
+                        error_msg = f"Failed to connect to printer at {printer_ip}:{printer_port}"
+                        result = self.make_api_request(
+                            f'/api/print-queue/{order["id"]}/fail',
+                            method='POST',
+                            data={'error': error_msg}
+                        )
+                        if result:
+                            logger.info(f"Order {order.get('id')} marked as failed")
+                        else:
+                            logger.warning(f"Failed to mark order {order.get('id')} as failed")
                     return False
             
             # Option 2: Named printer (existing logic)
@@ -332,7 +383,14 @@ class PrintServer:
             
             success = False
             for attempt in range(self.config['retry_attempts']):
-                if printer.print_order(order, self.event_settings):
+                # Use pre-formatted print_data if available
+                if order.get('print_data'):
+                    logger.info(f"Using pre-formatted print data for order {order.get('id')}")
+                    print_success = printer.send_raw_print_data(order['print_data'])
+                else:
+                    print_success = printer.print_order(order, self.event_settings)
+                
+                if print_success:
                     success = True
                     logger.info(f"Successfully printed order {order.get('id')} on attempt {attempt + 1}")
                     break
@@ -341,17 +399,47 @@ class PrintServer:
                     if attempt < self.config['retry_attempts'] - 1:
                         time.sleep(self.config['retry_delay'])
             
-            if success and order.get('id'):
-                self.make_api_request(
-                    f'/api/orders/{order["id"]}/status',
-                    method='PATCH',
-                    data={'status': 'printed', 'printed_at': datetime.now().isoformat()}
-                )
+            if order.get('id'):
+                if success:
+                    # Mark job as complete
+                    result = self.make_api_request(
+                        f'/api/print-queue/{order["id"]}/complete',
+                        method='POST'
+                    )
+                    if result and not result.get('error'):
+                        logger.info(f"Order {order.get('id')} marked as complete")
+                    else:
+                        error_msg = result.get('message', 'Unknown error') if result else 'No response from API'
+                        logger.error(f"Failed to mark order {order.get('id')} as complete: {error_msg}")
+                else:
+                    # Mark job as failed
+                    error_msg = f"Failed to print after {self.config['retry_attempts']} attempts"
+                    result = self.make_api_request(
+                        f'/api/print-queue/{order["id"]}/fail',
+                        method='POST',
+                        data={'error': error_msg}
+                    )
+                    if result:
+                        logger.info(f"Order {order.get('id')} marked as failed")
+                    else:
+                        logger.warning(f"Failed to mark order {order.get('id')} as failed")
             
             return success
             
         except Exception as e:
             logger.error(f"Failed to process order {order.get('id')}: {e}")
+            # Mark job as failed with exception details
+            if order.get('id'):
+                error_msg = f"Processing error: {str(e)}"
+                result = self.make_api_request(
+                    f'/api/print-queue/{order["id"]}/fail',
+                    method='POST',
+                    data={'error': error_msg}
+                )
+                if result:
+                    logger.info(f"Order {order.get('id')} marked as failed due to exception")
+                else:
+                    logger.warning(f"Failed to mark order {order.get('id')} as failed")
             return False
     
     def run(self):

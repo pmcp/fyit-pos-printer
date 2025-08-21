@@ -1,10 +1,84 @@
 # FriendlyPOS Print Server
 
-Lightweight Python-based print server for FriendlyPOS that bridges the cloud-based web app with local thermal printers. Designed to run on Teltonika RUT956 routers (OpenWrt) with minimal resource usage.
+Print server solution for FriendlyPOS that bridges the cloud-based web app with local thermal printers (Epson TM-m30). Optimized for Teltonika RUT956 routers with BusyBox shell environment.
 
-## Quick Start
+## ⚡ Quick Start (Teltonika RUT956)
 
-### Development Setup
+### The Working Solution
+
+Due to limitations on Teltonika routers (no `base64` command, limited Python), use the AWK decoder version:
+
+```bash
+# Copy the working script to router
+scp teltonika-awk-decoder.sh root@192.168.1.1:/root/
+
+# SSH into router
+ssh root@192.168.1.1
+
+# Make executable and run
+chmod +x /root/teltonika-awk-decoder.sh
+/root/teltonika-awk-decoder.sh &
+
+# Monitor logs
+tail -f /tmp/printserver.log
+```
+
+### Make Permanent (Auto-start on boot)
+
+```bash
+# Add to startup
+echo "/root/teltonika-awk-decoder.sh &" >> /etc/rc.local
+
+# OR create init script
+cat > /etc/init.d/printserver << 'EOF'
+#!/bin/sh /etc/rc.common
+START=99
+
+start() {
+    /root/teltonika-awk-decoder.sh &
+}
+
+stop() {
+    killall teltonika-awk-decoder.sh 2>/dev/null
+}
+EOF
+
+chmod +x /etc/init.d/printserver
+/etc/init.d/printserver enable
+```
+
+## 🔧 Technical Details
+
+### The Problem
+Teltonika RUT956 routers running BusyBox have:
+- ❌ No `base64` command
+- ❌ Limited Python (no socket module)
+- ❌ Shell binary handling issues that corrupt ESC/POS data
+
+### The Solution
+`teltonika-awk-decoder.sh` uses:
+- ✅ Pure AWK for Base64 decoding (built into BusyBox)
+- ✅ Direct piping to `nc` (netcat) to preserve binary data
+- ✅ `printf` for ESC/POS command generation
+- ✅ Fallback text mode if Base64 data is unavailable
+
+### How It Works
+
+1. Polls the API every 2 seconds for pending print jobs
+2. Decodes Base64 print data using AWK
+3. Sends binary ESC/POS commands directly to printer via netcat
+4. Updates order status via API (complete/failed)
+
+## 📁 Key Files
+
+- `teltonika-awk-decoder.sh` - Main working script for Teltonika routers
+- `test-awk-decoder.sh` - Test script to verify Base64 decoding works
+- `teltonika-debug-binary.sh` - Debug script to diagnose printing issues
+- `TELTONIKA-FIX-DEPLOYMENT.md` - Detailed deployment guide
+
+## Development Setup (Python Version)
+
+For development or non-Teltonika environments with full Python support:
 
 ```bash
 # Clone the repository
@@ -19,44 +93,20 @@ chmod +x setup.sh
 cp config.env.example config.env
 # Edit config.env with your API details
 
-# Run locally
-./run_dev.sh
+# Run Python version
+python3 print_server.py
 ```
-
-### Production (Teltonika Router)
-
-```bash
-# SSH into router
-ssh root@192.168.1.1
-
-# Clone and install
-cd /usr/local
-git clone https://github.com/yourusername/friendlypos-print-server.git friendlypos
-cd friendlypos
-./setup.sh
-
-# Configure
-cp config.env.example config.env
-vi config.env  # Add production credentials
-
-# Enable and start service
-/etc/init.d/print_server enable
-/etc/init.d/print_server start
-```
-
 ## Configuration
 
 ### Required Settings
 
 - `API_URL`: Your FriendlyPOS API endpoint
 - `API_KEY`: Authentication key for API access
-- `LOCATION_ID`: Unique identifier for this location
 
 ### Optional Settings
 
 - `POLL_INTERVAL`: Seconds between API polls (default: 2)
 - `DEBUG_LEVEL`: Logging level (INFO, DEBUG, ERROR)
-- `PRINTER_*`: Printer configurations (IP:PORT format)
 
 See `config.env.example` for all available options.
 
