@@ -256,6 +256,37 @@ class PrintServer:
             logger.error(f"Failed to load event settings: {e}")
             return False
     
+    def _is_private_ip(self, ip: str) -> bool:
+        """Check if IP address is in private network range"""
+        try:
+            # Parse IP address
+            parts = ip.split('.')
+            if len(parts) != 4:
+                return False
+            
+            octets = [int(p) for p in parts]
+            
+            # Check for private IP ranges
+            # 10.0.0.0 - 10.255.255.255
+            if octets[0] == 10:
+                return True
+            
+            # 172.16.0.0 - 172.31.255.255
+            if octets[0] == 172 and 16 <= octets[1] <= 31:
+                return True
+            
+            # 192.168.0.0 - 192.168.255.255
+            if octets[0] == 192 and octets[1] == 168:
+                return True
+            
+            # 127.0.0.0 - 127.255.255.255 (localhost)
+            if octets[0] == 127:
+                return True
+            
+            return False
+        except (ValueError, IndexError):
+            return False
+    
     def poll_for_jobs(self) -> List[Dict]:
         """Check API for pending print jobs"""
         try:
@@ -285,6 +316,38 @@ class PrintServer:
     def process_order(self, order: Dict) -> bool:
         """Process and print an order"""
         try:
+            # Option 1: Direct IP printing (if printer_ip is provided)
+            if order.get('printer_ip'):
+                printer_ip = order.get('printer_ip')
+                printer_port = order.get('printer_port', 9100)
+                
+                # Validate IP is in private network range for security
+                if not self._is_private_ip(printer_ip):
+                    logger.error(f"Refused to print to non-private IP: {printer_ip}")
+                    return False
+                
+                logger.info(f"Using direct IP printing to {printer_ip}:{printer_port}")
+                printer = SimplePrinter(printer_ip, printer_port)
+                
+                # Connect, print, and disconnect for direct IP
+                if printer.connect():
+                    success = printer.print_order(order, self.event_settings)
+                    printer.disconnect()
+                    
+                    if success:
+                        logger.info(f"Successfully printed order {order.get('id')} to {printer_ip}")
+                        if order.get('id'):
+                            self.make_api_request(
+                                f'/api/orders/{order["id"]}/status',
+                                method='PATCH',
+                                data={'status': 'printed', 'printed_at': datetime.now().isoformat(), 'printer_used': printer_ip}
+                            )
+                    return success
+                else:
+                    logger.error(f"Failed to connect to printer at {printer_ip}:{printer_port}")
+                    return False
+            
+            # Option 2: Named printer (existing logic)
             printer_name = order.get('printer', 'main')
             printer = self.printers.get(printer_name)
             

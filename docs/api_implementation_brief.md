@@ -25,8 +25,33 @@ You need to implement 4 API endpoints in the FriendlyPOS Nuxt application to ena
 2. Orders are saved to the database with a `location_id`
 3. Print server at each location polls the API every 2 seconds
 4. API returns pending orders for that specific location
-5. Print server sends orders to local thermal printers
+5. Print server sends orders to local thermal printers (via IP or name)
 6. Print server updates order status via API
+
+### Printer Selection Methods
+
+The print server supports two methods for selecting which printer to use:
+
+#### Method 1: Direct IP (Recommended)
+Include printer IP directly in the order data:
+```json
+{
+  "id": "123",
+  "printer_ip": "192.168.1.101",  // Kitchen printer IP
+  "printer_port": 9100,            // Optional, defaults to 9100
+  "items": [...]
+}
+```
+
+#### Method 2: Named Printers
+Reference a printer by name (requires configuration):
+```json
+{
+  "id": "123",
+  "printer": "kitchen",  // Maps to IP in print server config
+  "items": [...]
+}
+```
 
 ## Implementation Requirements
 
@@ -143,7 +168,12 @@ export default defineEventHandler(async (event) => {
       phone: order.customer_phone,
       email: order.customer_email
     },
-    notes: order.notes
+    notes: order.notes,
+    // Option 1: Direct IP printing (recommended)
+    printer_ip: order.printer_ip,     // e.g., "192.168.1.101"
+    printer_port: order.printer_port || 9100,
+    // Option 2: Named printer (legacy)
+    printer: order.printer_name        // e.g., "kitchen"
   }))
 })
 ```
