@@ -26,16 +26,13 @@ tail -f /tmp/printserver.log
 ### Make Permanent (Auto-start on boot)
 
 ```bash
-# Add to startup
-echo "/root/teltonika-awk-decoder.sh &" >> /etc/rc.local
-
-# OR create init script
+# Create service file
 cat > /etc/init.d/printserver << 'EOF'
 #!/bin/sh /etc/rc.common
 START=99
 
 start() {
-    /root/teltonika-awk-decoder.sh &
+    /root/teltonika-awk-decoder.sh > /dev/null 2>&1 &
 }
 
 stop() {
@@ -43,9 +40,22 @@ stop() {
 }
 EOF
 
+# Enable auto-start
 chmod +x /etc/init.d/printserver
 /etc/init.d/printserver enable
+/etc/init.d/printserver start
 ```
+
+Verify after reboot:
+```bash
+ps | grep awk-decoder
+```
+
+scp teltonika-simple-spooler-fixed.sh root@192.168.1.1:/root/
+
+curl -v -k -H "Authorization: Bearer d5a8262b7cfd8f46e599b36c584bb1ec16f28436680ddaa53f700e6d8a1765fa" "https://friendlypos.vercel.app/api/print-queue"
+
+curl -v -k -H "x-api-key: d5a8262b7cfd8f46e599b36c584bb1ec16f28436680ddaa53f700e6d8a1765fa" "https://friendlypos.vercel.app/api/print-queue"
 
 ## 🔧 Technical Details
 
