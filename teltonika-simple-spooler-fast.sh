@@ -1,13 +1,18 @@
 #!/bin/sh
 
-API_KEY="d5a8262b7cfd8f46e599b36c584bb1ec16f28436680ddaa53f700e6d8a1765fa"
+# Configuration - can be overridden with environment variables
+API_URL="${API_URL:-http://192.168.1.214:3000}"
+API_KEY="${API_KEY:-1234}"
+EVENT_ID="${EVENT_ID:-tLq7vbvees1E46fcb8BpE}"
 PRINTER_PORT="9100"
 PROCESSED="/tmp/processed_ids.txt"
 
 # Add Google DNS if not present
 grep -q "8.8.8.8" /etc/resolv.conf || echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-echo "$(date '+%H:%M:%S') Fast spooler started"
+echo "$(date '+%H:%M:%S') Crouton print spooler started"
+echo "  API_URL: $API_URL"
+echo "  EVENT_ID: $EVENT_ID"
 
 # Faster base64 decoder - simplified version
 decode_base64() {
@@ -39,43 +44,50 @@ process_job() {
     JOB_ID="$1"
     PRINT_DATA="$2"
     JOB_PRINTER_IP="$3"
-    
+
     TMPFILE="/tmp/print_$JOB_ID.bin"
-    
+
     # Decode print data
     echo "$PRINT_DATA" | decode_base64 > "$TMPFILE"
-    
+
     if [ -s "$TMPFILE" ]; then
         # Send to printer (simplified - no reset command for speed)
         timeout 5 nc $JOB_PRINTER_IP $PRINTER_PORT < "$TMPFILE" 2>/dev/null
-        
+
         if [ $? -eq 0 ]; then
             echo "$(date '+%H:%M:%S') Job $JOB_ID sent to $JOB_PRINTER_IP"
             echo "$JOB_ID" >> "$PROCESSED"
-            
+
             # Mark as completed (in background)
-            curl -s -m 3 -k -X POST \
+            curl -s -m 3 -X POST \
                 -H "x-api-key: $API_KEY" \
                 -H "Content-Type: application/json" \
-                -d "{\"id\":\"$JOB_ID\"}" \
-                https://friendlypos.vercel.app/api/print-queue/complete >/dev/null 2>&1 &
+                "$API_URL/api/print-server/jobs/$JOB_ID/complete" >/dev/null 2>&1 &
         else
-            echo "$(date '+%H:%M:%S') Job $JOB_ID failed"
+            echo "$(date '+%H:%M:%S') Job $JOB_ID failed to print"
+            # Mark as failed
+            curl -s -m 3 -X POST \
+                -H "x-api-key: $API_KEY" \
+                -H "Content-Type: application/json" \
+                -d '{"errorMessage":"Failed to send to printer"}' \
+                "$API_URL/api/print-server/jobs/$JOB_ID/fail" >/dev/null 2>&1 &
         fi
     fi
-    
+
     rm -f "$TMPFILE"
 }
 
 while true; do
-    # Poll API with shorter timeout
-    RESPONSE=$(curl -s -m 3 -k -H "x-api-key: $API_KEY" https://friendlypos.vercel.app/api/print-queue 2>/dev/null)
-    
-    if [ $? -eq 0 ] && [ ! -z "$RESPONSE" ] && echo "$RESPONSE" | grep -q '"print_data"'; then
-        # Extract all job data in one pass
+    # Poll API with shorter timeout (crouton-sales format)
+    # Remove newlines from JSON response for grep/sed parsing
+    RESPONSE=$(curl -s -m 5 -H "x-api-key: $API_KEY" "$API_URL/api/print-server/events/$EVENT_ID/jobs?mark_as_printing=true" 2>/dev/null)
+    RESPONSE=$(echo "$RESPONSE" | tr -d '\n\r' | tr -s ' ')
+
+    if [ ! -z "$RESPONSE" ] && echo "$RESPONSE" | grep -q '"printData"'; then
+        # Extract all job data in one pass (handle space after colon in JSON)
         JOBLIST="/tmp/jobs_$$.txt"
-        echo "$RESPONSE" | grep -o '"id":"[^"]*"' | sed 's/"id":"\([^"]*\)"/\1/g' > "$JOBLIST"
-        
+        echo "$RESPONSE" | grep -o '"id": *"[^"]*"' | sed 's/"id": *"\([^"]*\)"/\1/g' > "$JOBLIST"
+
         # Process jobs in parallel (up to 3 at once)
         ACTIVE_JOBS=0
         while IFS= read -r JOB_ID; do
@@ -84,19 +96,19 @@ while true; do
                 if [ -f "$PROCESSED" ] && grep -q "^$JOB_ID$" "$PROCESSED"; then
                     continue
                 fi
-                
-                # Extract job data
-                PRINT_DATA=$(echo "$RESPONSE" | sed -n "s/.*\"id\":\"$JOB_ID\"[^}]*\"print_data\":\"\([^\"]*\)\".*/\1/p")
-                JOB_PRINTER_IP=$(echo "$RESPONSE" | sed -n "s/.*\"id\":\"$JOB_ID\"[^}]*\"printer_ip\":\"\([^\"]*\)\".*/\1/p")
-                
+
+                # Extract job data (camelCase field names for crouton-sales, handle spaces in JSON)
+                PRINT_DATA=$(echo "$RESPONSE" | sed -n "s/.*\"id\": *\"$JOB_ID\"[^}]*\"printData\": *\"\([^\"]*\)\".*/\1/p")
+                JOB_PRINTER_IP=$(echo "$RESPONSE" | sed -n "s/.*\"id\": *\"$JOB_ID\"[^}]*\"printerIp\": *\"\([^\"]*\)\".*/\1/p")
+
                 if [ ! -z "$PRINT_DATA" ] && [ ! -z "$JOB_PRINTER_IP" ]; then
                     echo "$(date '+%H:%M:%S') Processing job $JOB_ID to $JOB_PRINTER_IP"
-                    
+
                     # Run job in background
                     process_job "$JOB_ID" "$PRINT_DATA" "$JOB_PRINTER_IP" &
-                    
+
                     ACTIVE_JOBS=$((ACTIVE_JOBS + 1))
-                    
+
                     # Limit concurrent jobs to avoid overwhelming
                     if [ $ACTIVE_JOBS -ge 3 ]; then
                         wait  # Wait for some jobs to complete
@@ -105,11 +117,11 @@ while true; do
                 fi
             fi
         done < "$JOBLIST"
-        
+
         # Wait for remaining jobs
         wait
         rm -f "$JOBLIST"
-        
+
         # Short sleep when jobs found
         sleep 1
     else
